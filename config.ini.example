@@ -11,3 +11,12 @@ elevation_m = 208.558
 # Hamlib rotator model number (see `rotctl --list`).
 model = 2
 host = 192.168.1.100
+# Seconds to command the rotator ahead of real time, to compensate for
+# its own slew lag. 0 disables lead compensation; tune upward from
+# there if your dish/rotor is slow to slew relative to fast passes.
+lead_time_s = 0.0
+# Max allowed difference (degrees) between a previously commanded
+# position and the rotator's actual read-back before it's flagged as a
+# possible stall/backlash/fault. Set this to a fraction of your
+# antenna's beamwidth.
+error_threshold_deg = 0.3

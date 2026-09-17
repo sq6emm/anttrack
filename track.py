@@ -5,6 +5,7 @@ import csv
 import os
 import sys
 import time
+from datetime import timedelta
 
 from skyfield.api import wgs84, N, E, load, EarthSatellite
 from pyhamtools.locator import calculate_distance, calculate_heading, latlong_to_locator
@@ -43,6 +44,15 @@ def load_config():
         rotator_cfg = {
             "model": parser.getint("rotator", "model"),
             "host": parser.get("rotator", "host"),
+            # Seconds to command the rotator ahead of real time, to
+            # compensate for its own slew lag. 0 disables lead compensation.
+            "lead_time_s": parser.getfloat("rotator", "lead_time_s", fallback=0.0),
+            # Max allowed difference (degrees) between a previously
+            # commanded position and the rotator's actual read-back
+            # before it's flagged as a possible stall/backlash/fault.
+            "error_threshold_deg": parser.getfloat(
+                "rotator", "error_threshold_deg", fallback=0.3
+            ),
         }
     except (configparser.Error, ValueError) as exc:
         sys.exit(f"ERROR: invalid config file {CONFIG_FILE}: {exc}")
@@ -148,27 +158,48 @@ def main():
 
     rot.open()
 
+    lead_time_s = rotator_cfg["lead_time_s"]
+    error_threshold_deg = rotator_cfg["error_threshold_deg"]
+    last_cmd_az, last_cmd_el = None, None
+
     while True:
         try:
             t = ts.now()
+            t_lead = t + timedelta(seconds=lead_time_s) if lead_time_s else t
             if isinstance(target, EarthSatellite):
                 diff = target - qth
-                astrometric = diff.at(t)
+                astrometric = diff.at(t_lead)
                 alt, az_angle, _ = astrometric.altaz()
             else:
-                astrometric = qth.at(t).observe(target)
+                astrometric = qth.at(t_lead).observe(target)
                 alt, az_angle, _ = astrometric.apparent().altaz()
 
             el = alt.degrees
             az = az_angle.degrees
             if el > 0:
-                print("SET", t.utc_strftime(), round(az, 1), round(el, 1))
-                rot.set_position(round(az, 1), round(el, 1))
+                cmd_az, cmd_el = round(az, 1), round(el, 1)
+                lead_note = f" (lead {lead_time_s:g}s)" if lead_time_s else ""
+                print("SET", t.utc_strftime(), cmd_az, cmd_el, lead_note)
+                rot.set_position(cmd_az, cmd_el)
                 time.sleep(1)
             else:
+                cmd_az, cmd_el = None, None
                 print("BELOW HORIZON", t.utc_strftime(), round(az, 2), round(el, 2))
+
             raz, rel = rot.get_position()
             print("GET", t.utc_strftime(), round(raz, 2), round(rel, 2))
+
+            if last_cmd_az is not None:
+                az_error = abs(raz - last_cmd_az) % 360
+                az_error = min(az_error, 360 - az_error)
+                el_error = abs(rel - last_cmd_el)
+                if az_error > error_threshold_deg or el_error > error_threshold_deg:
+                    print(f"WARNING: rotator pointing error exceeds "
+                          f"{error_threshold_deg}deg (commanded "
+                          f"{last_cmd_az},{last_cmd_el}, actual {raz},{rel}); "
+                          "check for backlash, a stall, or a mechanical fault")
+
+            last_cmd_az, last_cmd_el = cmd_az, cmd_el
             time.sleep(3)
         except (KeyboardInterrupt, SystemExit):
             print("Exiting...")
