@@ -23,6 +23,12 @@ SATELLITE_CACHE_FILE = 'satellites.csv'  # custom filename, not 'gp.php'
 SATELLITE_CACHE_MAX_DAYS = 3.0           # re-download once cache is this old
 SATELLITE_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=csv'
 
+# Consecutive non-improving over-threshold checks before a pointing error
+# is treated as a real stall/fault rather than the dish still slewing.
+ROTATOR_STALL_CHECKS = 3
+# Ignore read-back changes smaller than this as slew progress (float/encoder jitter).
+ROTATOR_IMPROVE_MARGIN_DEG = 0.05
+
 
 def load_config():
     """Load QTH location and rotator settings from CONFIG_FILE."""
@@ -95,6 +101,22 @@ def load_satellites(loader, ts):
             (EarthSatellite.from_omm(ts, fields) for fields in data)}
 
 
+def _next_stall_count(error, prev_error, stall_count, threshold, margin):
+    """Track whether a rotator axis is stuck rather than still slewing.
+
+    Returns 0 whenever the error is within tolerance or has meaningfully
+    shrunk since the last check (still converging on the commanded
+    position). Otherwise increments the count, so a real stall/backlash/
+    fault only gets flagged once the error fails to improve over several
+    consecutive checks, not on any single reading taken mid-slew.
+    """
+    if error <= threshold:
+        return 0
+    if prev_error is not None and error <= prev_error - margin:
+        return 0
+    return stall_count + 1
+
+
 def load_planets(loader):
     """Load the JPL ephemeris.
 
@@ -161,6 +183,8 @@ def main():
     lead_time_s = rotator_cfg["lead_time_s"]
     error_threshold_deg = rotator_cfg["error_threshold_deg"]
     last_cmd_az, last_cmd_el = None, None
+    prev_az_error, prev_el_error = None, None
+    az_stall_count, el_stall_count = 0, 0
 
     while True:
         try:
@@ -193,11 +217,25 @@ def main():
                 az_error = abs(raz - last_cmd_az) % 360
                 az_error = min(az_error, 360 - az_error)
                 el_error = abs(rel - last_cmd_el)
-                if az_error > error_threshold_deg or el_error > error_threshold_deg:
-                    print(f"WARNING: rotator pointing error exceeds "
-                          f"{error_threshold_deg}deg (commanded "
-                          f"{last_cmd_az},{last_cmd_el}, actual {raz},{rel}); "
-                          "check for backlash, a stall, or a mechanical fault")
+
+                az_stall_count = _next_stall_count(
+                    az_error, prev_az_error, az_stall_count,
+                    error_threshold_deg, ROTATOR_IMPROVE_MARGIN_DEG)
+                el_stall_count = _next_stall_count(
+                    el_error, prev_el_error, el_stall_count,
+                    error_threshold_deg, ROTATOR_IMPROVE_MARGIN_DEG)
+                prev_az_error, prev_el_error = az_error, el_error
+
+                if (az_stall_count >= ROTATOR_STALL_CHECKS
+                        or el_stall_count >= ROTATOR_STALL_CHECKS):
+                    print(f"WARNING: rotator not converging on commanded "
+                          f"position (commanded {last_cmd_az},{last_cmd_el}, "
+                          f"actual {raz},{rel}, az_error {az_error:.2f}deg, "
+                          f"el_error {el_error:.2f}deg); check for backlash, "
+                          "a stall, or a mechanical fault")
+            else:
+                prev_az_error, prev_el_error = None, None
+                az_stall_count, el_stall_count = 0, 0
 
             last_cmd_az, last_cmd_el = cmd_az, cmd_el
             time.sleep(3)
@@ -220,6 +258,11 @@ def main():
                 rot.open()
             except Exception as reopen_exc:  # pylint: disable=broad-except
                 print(f"ERROR: failed to reopen rotator connection ({reopen_exc}); retrying in 3s")
+            # Don't compare against a position commanded before the outage:
+            # a large gap right after reconnecting is expected, not a fault.
+            last_cmd_az, last_cmd_el = None, None
+            prev_az_error, prev_el_error = None, None
+            az_stall_count, el_stall_count = 0, 0
             time.sleep(3)
 
 
