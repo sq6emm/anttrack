@@ -28,6 +28,17 @@ SATELLITE_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMA
 ROTATOR_STALL_CHECKS = 3
 # Ignore read-back changes smaller than this as slew progress (float/encoder jitter).
 ROTATOR_IMPROVE_MARGIN_DEG = 0.05
+# Skip re-commanding the rotator when the new position is this close to the
+# last one actually sent, to avoid pointless traffic/wear between checks.
+ROTATOR_DEADBAND_DEG = 0.05
+
+# Update cadence for fast-moving targets (satellites can cross the sky in
+# minutes, with high angular velocity near zenith).
+SATELLITE_UPDATE_INTERVAL_S = 3.0
+# Update cadence for targets whose apparent motion is dominated by Earth's
+# rotation (~15 deg/hour): sun, moon, planets, stars. At that rate this
+# interval keeps drift well under the dish's beamwidth between checks.
+SLOW_TARGET_UPDATE_INTERVAL_S = 30.0
 
 
 def load_config():
@@ -99,6 +110,12 @@ def load_satellites(loader, ts):
 
     return {sat.name: sat for sat in
             (EarthSatellite.from_omm(ts, fields) for fields in data)}
+
+
+def _azimuth_diff(a, b):
+    """Angular difference between two azimuths, handling 0/360 wraparound."""
+    diff = abs(a - b) % 360
+    return min(diff, 360 - diff)
 
 
 def _next_stall_count(error, prev_error, stall_count, threshold, margin):
@@ -186,11 +203,15 @@ def main():
     prev_az_error, prev_el_error = None, None
     az_stall_count, el_stall_count = 0, 0
 
+    is_satellite = isinstance(target, EarthSatellite)
+    update_interval_s = (SATELLITE_UPDATE_INTERVAL_S if is_satellite
+                          else SLOW_TARGET_UPDATE_INTERVAL_S)
+
     while True:
         try:
             t = ts.now()
             t_lead = t + timedelta(seconds=lead_time_s) if lead_time_s else t
-            if isinstance(target, EarthSatellite):
+            if is_satellite:
                 diff = target - qth
                 astrometric = diff.at(t_lead)
                 alt, az_angle, _ = astrometric.altaz()
@@ -203,9 +224,16 @@ def main():
             if el > 0:
                 cmd_az, cmd_el = round(az, 1), round(el, 1)
                 lead_note = f" (lead {lead_time_s:g}s)" if lead_time_s else ""
-                print("SET", t.utc_strftime(), cmd_az, cmd_el, lead_note)
-                rot.set_position(cmd_az, cmd_el)
-                time.sleep(1)
+                moved = (last_cmd_az is None
+                         or _azimuth_diff(cmd_az, last_cmd_az) >= ROTATOR_DEADBAND_DEG
+                         or abs(cmd_el - last_cmd_el) >= ROTATOR_DEADBAND_DEG)
+                if moved:
+                    print("SET", t.utc_strftime(), cmd_az, cmd_el, lead_note)
+                    rot.set_position(cmd_az, cmd_el)
+                else:
+                    print("SET", t.utc_strftime(), cmd_az, cmd_el, lead_note,
+                          "(unchanged, skipped)")
+                    cmd_az, cmd_el = last_cmd_az, last_cmd_el
             else:
                 cmd_az, cmd_el = None, None
                 print("BELOW HORIZON", t.utc_strftime(), round(az, 2), round(el, 2))
@@ -214,8 +242,7 @@ def main():
             print("GET", t.utc_strftime(), round(raz, 2), round(rel, 2))
 
             if last_cmd_az is not None:
-                az_error = abs(raz - last_cmd_az) % 360
-                az_error = min(az_error, 360 - az_error)
+                az_error = _azimuth_diff(raz, last_cmd_az)
                 el_error = abs(rel - last_cmd_el)
 
                 az_stall_count = _next_stall_count(
@@ -238,7 +265,7 @@ def main():
                 az_stall_count, el_stall_count = 0, 0
 
             last_cmd_az, last_cmd_el = cmd_az, cmd_el
-            time.sleep(3)
+            time.sleep(update_interval_s)
         except (KeyboardInterrupt, SystemExit):
             print("Exiting...")
             try:
