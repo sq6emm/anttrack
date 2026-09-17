@@ -1,0 +1,13 @@
+# Copy this file to config.ini and fill in your own values.
+# config.ini is gitignored so your home QTH coordinates and rotator's
+# network address don't end up committed to version control.
+
+[qth]
+latitude = 51.618785667
+longitude = 17.392723960
+elevation_m = 208.558
+
+[rotator]
+# Hamlib rotator model number (see `rotctl --list`).
+model = 2
+host = 192.168.1.100
