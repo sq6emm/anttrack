@@ -16,8 +16,8 @@ from .tracker import Tracker, TrackerError
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 STATUS_PUSH_INTERVAL_S = 1.0
-CAMERA_FRAME_WAIT_S = 10.0
-MJPEG_BOUNDARY = "anttrackframe"
+CAMERA_FRAGMENT_WAIT_S = 10.0
+CAMERA_INIT_WAIT_S = 10.0
 
 
 @asynccontextmanager
@@ -28,10 +28,7 @@ async def lifespan(app: FastAPI):
     app.state.rotator_cfg = rotator_cfg
 
     camera_cfg = load_camera_config()
-    app.state.camera = CameraStream(
-        camera_cfg["rtsp_url"] if camera_cfg else None,
-        fps=camera_cfg["fps"] if camera_cfg else 5.0,
-    )
+    app.state.camera = CameraStream(camera_cfg["rtsp_url"] if camera_cfg else None)
     app.state.camera.start()
 
     yield
@@ -169,35 +166,35 @@ async def api_camera_snapshot(request: Request):
     camera = get_camera(request)
     if not camera.enabled:
         return _json_error(404, "no camera configured")
-    frame, _ = camera.latest()
+    frame = await asyncio.to_thread(camera.capture_snapshot)
     if frame is None:
-        return _json_error(503, "camera has no frame yet")
+        return _json_error(503, "could not capture a snapshot")
     return Response(content=frame, media_type="image/jpeg")
 
 
-@app.get("/api/camera/stream.mjpg")
+@app.get("/api/camera/stream.mp4")
 async def api_camera_stream(request: Request):
     camera = get_camera(request)
     if not camera.enabled:
         return _json_error(404, "no camera configured")
 
-    async def frames():
+    init_segment = await asyncio.to_thread(camera.get_init_segment, CAMERA_INIT_WAIT_S)
+    if init_segment is None:
+        return _json_error(503, "camera stream not ready yet")
+
+    async def fragments():
+        yield init_segment
         seq = 0
         while True:
             if await request.is_disconnected():
                 break
-            frame, seq = await asyncio.to_thread(camera.get_frame, seq, CAMERA_FRAME_WAIT_S)
-            if frame is None:
+            fragment, seq = await asyncio.to_thread(
+                camera.get_fragment, seq, CAMERA_FRAGMENT_WAIT_S)
+            if fragment is None:
                 continue  # nothing new within the wait window; recheck disconnect and retry
-            yield (
-                f"--{MJPEG_BOUNDARY}\r\n"
-                f"Content-Type: image/jpeg\r\n"
-                f"Content-Length: {len(frame)}\r\n\r\n"
-            ).encode() + frame + b"\r\n"
+            yield fragment
 
-    return StreamingResponse(
-        frames(), media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"
-    )
+    return StreamingResponse(fragments(), media_type="video/mp4")
 
 
 @app.websocket("/ws/status")

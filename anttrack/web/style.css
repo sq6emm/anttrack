@@ -189,7 +189,7 @@ main {
   border-radius: 8px;
   overflow: hidden;
 }
-.camera-frame img {
+.camera-frame video {
   width: 100%;
   height: 100%;
   object-fit: cover;

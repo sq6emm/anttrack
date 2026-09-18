@@ -67,9 +67,4 @@ def load_camera_config(config_file=CONFIG_FILE):
     if not rtsp_url:
         return None
 
-    try:
-        fps = parser.getfloat("camera", "fps", fallback=5.0)
-    except ValueError as exc:
-        sys.exit(f"ERROR: invalid config file {config_file}: {exc}")
-
-    return {"rtsp_url": rtsp_url, "fps": fps}
+    return {"rtsp_url": rtsp_url}

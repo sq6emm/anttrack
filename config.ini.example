@@ -21,11 +21,10 @@ lead_time_s = 0.0
 # antenna's beamwidth.
 error_threshold_deg = 0.3
 
-# Optional: shows a live preview in the web UI, relayed from RTSP to
-# browser-playable MJPEG via ffmpeg. Delete this whole section (or leave
-# rtsp_url blank) to disable it. Credentials go right in the URL, which
-# is one more reason config.ini is gitignored rather than committed.
+# Optional: shows a live preview in the web UI. ffmpeg remuxes the RTSP
+# feed (H.264 expected) into fragmented MP4 with no re-encoding, played
+# natively by the browser's <video> tag. Delete this whole section (or
+# leave rtsp_url blank) to disable it. Credentials go right in the URL,
+# which is one more reason config.ini is gitignored rather than committed.
 [camera]
 rtsp_url = rtsp://user:password@192.168.1.50:554/h264Preview_01_sub
-# Frames per second re-encoded for the browser-facing MJPEG stream.
-fps = 5

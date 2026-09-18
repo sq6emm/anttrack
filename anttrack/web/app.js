@@ -285,14 +285,14 @@
   setInterval(pollLog, 2000);
   pollLog();
 
-  // -- camera (optional RTSP-relayed MJPEG preview) --
+  // -- camera (optional RTSP-relayed fMP4 preview, native <video> playback) --
   function withKey(path) {
     const key = getApiKey();
     return key ? `${path}${path.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}` : path;
   }
 
   const cameraPanel = $("camera-panel");
-  const cameraImg = $("camera-img");
+  const cameraVideo = $("camera-video");
   const cameraOverlay = $("camera-overlay");
   let cameraStarted = false;
   let cameraRetryTimer = null;
@@ -305,14 +305,19 @@
   function startCameraStream() {
     clearTimeout(cameraRetryTimer);
     setCameraOverlay("Connecting…");
-    cameraImg.src = withKey(`/api/camera/stream.mjpg?t=${Date.now()}`);
+    cameraVideo.src = withKey(`/api/camera/stream.mp4?t=${Date.now()}`);
+    cameraVideo.load();
+    cameraVideo.play().catch(() => { /* autoplay can reject before data arrives; ignore */ });
   }
 
-  cameraImg.addEventListener("load", () => setCameraOverlay(""));
-  cameraImg.addEventListener("error", () => {
+  function retryCameraStream() {
     setCameraOverlay("Camera unavailable – retrying…");
     cameraRetryTimer = setTimeout(startCameraStream, 5000);
-  });
+  }
+
+  cameraVideo.addEventListener("playing", () => setCameraOverlay(""));
+  cameraVideo.addEventListener("error", retryCameraStream);
+  cameraVideo.addEventListener("ended", retryCameraStream);
 
   async function pollCameraStatus() {
     try {
