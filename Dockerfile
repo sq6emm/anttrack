@@ -5,10 +5,12 @@ FROM debian:bookworm-slim
 # --system-site-packages so it can see that module while still letting pip
 # install FastAPI/uvicorn/skyfield/pyhamtools without touching system
 # packages (Debian's Python is "externally managed" as of bookworm).
+# ffmpeg relays the optional RTSP camera feed into browser-playable MJPEG.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-venv \
         python3-hamlib \
+        ffmpeg \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

@@ -50,3 +50,26 @@ def load_config(config_file=CONFIG_FILE):
         sys.exit(f"ERROR: invalid config file {config_file}: {exc}")
 
     return qth_cfg, rotator_cfg
+
+
+def load_camera_config(config_file=CONFIG_FILE):
+    """Load the optional [camera] section. Returns None if absent/blank,
+    which disables the camera panel entirely."""
+    if not os.path.exists(config_file):
+        return None
+
+    parser = configparser.ConfigParser()
+    parser.read(config_file)
+    if not parser.has_section("camera"):
+        return None
+
+    rtsp_url = parser.get("camera", "rtsp_url", fallback="").strip()
+    if not rtsp_url:
+        return None
+
+    try:
+        fps = parser.getfloat("camera", "fps", fallback=5.0)
+    except ValueError as exc:
+        sys.exit(f"ERROR: invalid config file {config_file}: {exc}")
+
+    return {"rtsp_url": rtsp_url, "fps": fps}

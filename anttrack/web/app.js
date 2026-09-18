@@ -285,6 +285,48 @@
   setInterval(pollLog, 2000);
   pollLog();
 
+  // -- camera (optional RTSP-relayed MJPEG preview) --
+  function withKey(path) {
+    const key = getApiKey();
+    return key ? `${path}${path.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}` : path;
+  }
+
+  const cameraPanel = $("camera-panel");
+  const cameraImg = $("camera-img");
+  const cameraOverlay = $("camera-overlay");
+  let cameraStarted = false;
+  let cameraRetryTimer = null;
+
+  function setCameraOverlay(text) {
+    if (text) { cameraOverlay.textContent = text; cameraOverlay.classList.add("show"); }
+    else { cameraOverlay.classList.remove("show"); }
+  }
+
+  function startCameraStream() {
+    clearTimeout(cameraRetryTimer);
+    setCameraOverlay("Connecting…");
+    cameraImg.src = withKey(`/api/camera/stream.mjpg?t=${Date.now()}`);
+  }
+
+  cameraImg.addEventListener("load", () => setCameraOverlay(""));
+  cameraImg.addEventListener("error", () => {
+    setCameraOverlay("Camera unavailable – retrying…");
+    cameraRetryTimer = setTimeout(startCameraStream, 5000);
+  });
+
+  async function pollCameraStatus() {
+    try {
+      const status = await api("/api/camera/status");
+      if (!status.enabled) { cameraPanel.hidden = true; return; }
+      cameraPanel.hidden = false;
+      if (!cameraStarted) { cameraStarted = true; startCameraStream(); }
+    } catch (err) {
+      console.error("camera status poll failed", err);
+    }
+  }
+  setInterval(pollCameraStatus, 5000);
+  pollCameraStatus();
+
   // -- live status via WebSocket, falling back to polling --
   function connectWs() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";

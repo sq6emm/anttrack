@@ -4,17 +4,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import API_KEY, load_config
+from .camera import CameraStream
+from .config import API_KEY, load_camera_config, load_config
 from .satellites import CatalogError
 from .tracker import Tracker, TrackerError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 STATUS_PUSH_INTERVAL_S = 1.0
+CAMERA_FRAME_WAIT_S = 10.0
+MJPEG_BOUNDARY = "anttrackframe"
 
 
 @asynccontextmanager
@@ -23,7 +26,17 @@ async def lifespan(app: FastAPI):
     app.state.tracker = Tracker(qth_cfg, rotator_cfg)
     app.state.qth_cfg = qth_cfg
     app.state.rotator_cfg = rotator_cfg
+
+    camera_cfg = load_camera_config()
+    app.state.camera = CameraStream(
+        camera_cfg["rtsp_url"] if camera_cfg else None,
+        fps=camera_cfg["fps"] if camera_cfg else 5.0,
+    )
+    app.state.camera.start()
+
     yield
+
+    app.state.camera.stop()
     app.state.tracker.close()
 
 
@@ -41,10 +54,17 @@ def get_tracker(request: Request) -> Tracker:
     return request.app.state.tracker
 
 
+def get_camera(request: Request) -> CameraStream:
+    return request.app.state.camera
+
+
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
     if API_KEY and request.url.path.startswith("/api/"):
-        if request.headers.get("x-api-key") != API_KEY:
+        # <img>/<video> elements (camera snapshot/stream) can't set custom
+        # headers, so also accept the key as a query param.
+        supplied = request.headers.get("x-api-key") or request.query_params.get("key")
+        if supplied != API_KEY:
             return _json_error(401, "missing or invalid X-API-Key")
     return await call_next(request)
 
@@ -137,6 +157,47 @@ async def api_stop(request: Request):
     tracker = get_tracker(request)
     tracker.stop()
     return tracker.status()
+
+
+@app.get("/api/camera/status")
+async def api_camera_status(request: Request):
+    return get_camera(request).status()
+
+
+@app.get("/api/camera/snapshot.jpg")
+async def api_camera_snapshot(request: Request):
+    camera = get_camera(request)
+    if not camera.enabled:
+        return _json_error(404, "no camera configured")
+    frame, _ = camera.latest()
+    if frame is None:
+        return _json_error(503, "camera has no frame yet")
+    return Response(content=frame, media_type="image/jpeg")
+
+
+@app.get("/api/camera/stream.mjpg")
+async def api_camera_stream(request: Request):
+    camera = get_camera(request)
+    if not camera.enabled:
+        return _json_error(404, "no camera configured")
+
+    async def frames():
+        seq = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            frame, seq = await asyncio.to_thread(camera.get_frame, seq, CAMERA_FRAME_WAIT_S)
+            if frame is None:
+                continue  # nothing new within the wait window; recheck disconnect and retry
+            yield (
+                f"--{MJPEG_BOUNDARY}\r\n"
+                f"Content-Type: image/jpeg\r\n"
+                f"Content-Length: {len(frame)}\r\n\r\n"
+            ).encode() + frame + b"\r\n"
+
+    return StreamingResponse(
+        frames(), media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"
+    )
 
 
 @app.websocket("/ws/status")
