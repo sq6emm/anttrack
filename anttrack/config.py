@@ -67,4 +67,14 @@ def load_camera_config(config_file=CONFIG_FILE):
     if not rtsp_url:
         return None
 
-    return {"rtsp_url": rtsp_url}
+    # Optional crop/scale/fps to frame a fixed subject (e.g. an antenna)
+    # and exclude everything else in the shot. Any of these being set
+    # forces an actual decode+re-encode instead of a cheap stream copy.
+    crop = parser.get("camera", "crop", fallback="").strip() or None
+    scale = parser.get("camera", "scale", fallback="").strip() or None
+    try:
+        fps = parser.getfloat("camera", "fps", fallback=0.0) or None
+    except ValueError as exc:
+        sys.exit(f"ERROR: invalid config file {config_file}: {exc}")
+
+    return {"rtsp_url": rtsp_url, "crop": crop, "scale": scale, "fps": fps}

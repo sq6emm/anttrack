@@ -28,3 +28,21 @@ error_threshold_deg = 0.3
 # which is one more reason config.ini is gitignored rather than committed.
 [camera]
 rtsp_url = rtsp://user:password@192.168.1.50:554/h264Preview_01_sub
+# All three below are optional and only make sense together: cropping
+# to frame a fixed subject (e.g. an antenna) and scaling the result
+# back up. Setting any of them switches from a cheap stream copy to an
+# actual decode+re-encode, so also drop fps well below the source's own
+# rate for anything that mostly doesn't move -- it's a big CPU saving
+# for a subject like an antenna that isn't going to move in frame.
+#
+# crop: source-pixel box as width:height:x:y (top-left origin). Use
+# ffprobe/ffplay on rtsp_url, or grab one frame with:
+#   ffmpeg -rtsp_transport tcp -i <rtsp_url> -frames:v 1 out.jpg
+# to see where your subject sits before picking numbers.
+# crop = 210:190:20:80
+#
+# scale: output size as width:height, applied after the crop.
+# scale = 640:580
+#
+# fps: output frame rate. Only relevant alongside crop/scale above.
+# fps = 5

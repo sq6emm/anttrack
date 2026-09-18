@@ -1,12 +1,21 @@
 """Optional RTSP camera relay.
 
 Browsers can't play RTSP directly, so this pulls the stream with ffmpeg
-(installed via apt in the Docker image) and remuxes it -- no re-encoding,
-just repackaging -- into fragmented MP4, which a plain HTML5 <video> tag
-can play directly as a live, low-latency stream (no MediaSource/JS
-plumbing needed; the browser's own MP4 demuxer reads it progressively).
-This is lighter than an MJPEG relay: no per-frame JPEG re-encode, and
-H.264's inter-frame compression instead of a full image every frame.
+(installed via apt in the Docker image) and remuxes it into fragmented
+MP4, which a plain HTML5 <video> tag can play directly as a live,
+low-latency stream (no MediaSource/JS plumbing needed; the browser's own
+MP4 demuxer reads it progressively).
+
+With no crop/scale/fps configured this is a straight remux (-c:v copy,
+no re-encode): lighter than an MJPEG relay, since there's no per-frame
+JPEG re-encode and H.264's inter-frame compression beats a full image
+every frame. Configuring a crop (e.g. to frame a fixed antenna and
+exclude everything else in the shot) requires an actual decode +
+filter + re-encode, since a compressed frame can't be cropped without
+decoding it first; every output frame is then forced to be a keyframe
+(needed since each MP4 fragment must be independently decodable for a
+client that just connected) which keeps that re-encode cheap at a low
+fps -- appropriate for a subject that isn't moving in frame anyway.
 
 Runs in a background thread with the same reconnect-on-any-error shape
 as the rotator tracking loop.
@@ -56,8 +65,11 @@ def _read_box(fp):
 
 
 class CameraStream:
-    def __init__(self, rtsp_url):
+    def __init__(self, rtsp_url, crop=None, scale=None, fps=None):
         self.rtsp_url = rtsp_url
+        self.crop = crop      # ffmpeg crop filter args: "w:h:x:y"
+        self.scale = scale    # ffmpeg scale filter args: "w:h"
+        self.fps = fps        # output frames/sec; only meaningful with crop/scale
 
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
@@ -122,14 +134,21 @@ class CameraStream:
             return self._latest_fragment, self._fragment_seq
 
     def capture_snapshot(self, timeout=SNAPSHOT_TIMEOUT_S):
-        """One-off still JPEG grab, independent of the live relay."""
+        """One-off still JPEG grab, independent of the live relay. Uses the
+        same crop/scale as the live stream so it frames the same subject."""
         cmd = [
             "ffmpeg", "-loglevel", "error",
             "-rtsp_transport", "tcp",
             "-i", self.rtsp_url,
-            "-frames:v", "1", "-f", "image2", "-q:v", "3",
-            "pipe:1",
         ]
+        filters = []
+        if self.crop:
+            filters.append(f"crop={self.crop}")
+        if self.scale:
+            filters.append(f"scale={self.scale}")
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+        cmd += ["-frames:v", "1", "-f", "image2", "-q:v", "3", "pipe:1"]
         try:
             result = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
@@ -151,16 +170,42 @@ class CameraStream:
                 self._init_segment = None  # force a fresh header on reconnect
             self._stop_event.wait(RECONNECT_DELAY_S)
 
-    def _stream_once(self):
+    def _build_command(self):
         cmd = [
             "ffmpeg", "-loglevel", "error",
             "-rtsp_transport", "tcp",
             "-i", self.rtsp_url,
-            "-an", "-c:v", "copy",
+            "-an",
+        ]
+
+        filters = []
+        if self.crop:
+            filters.append(f"crop={self.crop}")
+        if self.scale:
+            filters.append(f"scale={self.scale}")
+
+        if filters or self.fps:
+            if filters:
+                cmd += ["-vf", ",".join(filters)]
+            if self.fps:
+                cmd += ["-r", str(self.fps)]
+            # Every fragment must stand alone for a client that just
+            # connected, so every frame has to be a keyframe (cheap here:
+            # low fps, and intra-only encoding skips motion estimation).
+            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-g", "1", "-keyint_min", "1"]
+        else:
+            cmd += ["-c:v", "copy"]
+
+        cmd += [
             "-f", "mp4",
             "-movflags", "empty_moov+frag_every_frame+default_base_moof",
             "pipe:1",
         ]
+        return cmd
+
+    def _stream_once(self):
+        cmd = self._build_command()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self._proc = proc
 

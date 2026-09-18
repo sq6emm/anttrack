@@ -28,7 +28,13 @@ async def lifespan(app: FastAPI):
     app.state.rotator_cfg = rotator_cfg
 
     camera_cfg = load_camera_config()
-    app.state.camera = CameraStream(camera_cfg["rtsp_url"] if camera_cfg else None)
+    if camera_cfg:
+        app.state.camera = CameraStream(
+            camera_cfg["rtsp_url"], crop=camera_cfg["crop"],
+            scale=camera_cfg["scale"], fps=camera_cfg["fps"],
+        )
+    else:
+        app.state.camera = CameraStream(None)
     app.state.camera.start()
 
     yield
