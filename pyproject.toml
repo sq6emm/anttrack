@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Keep this to the checks that catch real bugs (unused/undefined names,
+# basic style, import order). The broader rule families (bandit-style S,
+# bugbear B, async, etc.) flag things this codebase does on purpose, e.g.
+# the rotator loop's deliberate broad `except Exception` for
+# reconnect-on-any-error resilience.
+select = ["E", "F", "W", "I"]

@@ -1,0 +1,23 @@
+services:
+  anttrack:
+    # Built and published by .github/workflows/ci.yml on every push to
+    # main (and version tags). Pin to a tag/sha instead of :latest if you
+    # want reproducible upgrades: ghcr.io/sq6emm/anttrack:v1.2.3
+    image: ghcr.io/sq6emm/anttrack:latest
+    pull_policy: always
+    ports:
+      - "8000:8000"
+    volumes:
+      # Put your config.ini here (copy it from config.ini.example). This
+      # also holds the satellite/ephemeris caches across restarts.
+      - ./data:/app/data
+    environment:
+      # Uncomment to require this key via the X-API-Key header / the web
+      # UI's key prompt. Leave unset for trusted-LAN use.
+      # ANTTRACK_API_KEY: "change-me"
+      TZ: "UTC"
+    restart: unless-stopped
+    # If the rotator's host/IP in config.ini isn't reachable from the
+    # default bridge network (e.g. it's on the same L2 segment as the
+    # Docker host but routing is finicky), switch to:
+    # network_mode: host

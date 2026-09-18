@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AntTrack</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>AntTrack</h1>
+  <div class="header-right">
+    <span class="pill" id="conn-pill"><span class="dot"></span><span id="conn-label">Connecting&hellip;</span></span>
+    <button class="icon-btn" id="theme-toggle" title="Toggle theme">&#9789;</button>
+  </div>
+</header>
+
+<main>
+  <section class="card compass-wrap">
+    <h2 style="align-self:flex-start;">Sky view</h2>
+    <svg id="compass" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Azimuth/elevation compass"></svg>
+    <div class="legend">
+      <span class="swatch commanded">Commanded</span>
+      <span class="swatch actual">Actual</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <div class="status-grid">
+      <div class="status-field"><span class="label">Mode</span><span class="value" id="s-mode">&mdash;</span></div>
+      <div class="status-field"><span class="label">Target</span><span class="value" id="s-request">&mdash;</span></div>
+      <div class="status-field"><span class="label">Commanded az/el</span><span class="value mono" id="s-commanded">&mdash;</span></div>
+      <div class="status-field"><span class="label">Actual az/el</span><span class="value mono" id="s-actual">&mdash;</span></div>
+      <div class="status-field"><span class="label">Pointing error</span><span class="value mono" id="s-error">&mdash;</span></div>
+      <div class="status-field"><span class="label">Below horizon</span><span class="value" id="s-horizon">&mdash;</span></div>
+      <div class="status-field"><span class="label">Heading / distance</span><span class="value mono" id="s-locator">&mdash;</span></div>
+      <div class="status-field"><span class="label">Last update (UTC)</span><span class="value mono" id="s-updated">&mdash;</span></div>
+    </div>
+    <div class="banner" id="banner"></div>
+  </section>
+
+  <section class="card full-width">
+    <div class="toolbar-row">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="target">Track object</button>
+        <button class="tab-btn" data-tab="loc">Point at locator</button>
+        <button class="tab-btn" data-tab="raw">Raw az/el</button>
+      </div>
+      <button class="danger" id="stop-btn">Stop</button>
+    </div>
+
+    <div class="tab-panel active" id="tab-target">
+      <div class="field-row">
+        <div class="field">
+          <label for="target-input">Satellite or body name</label>
+          <input id="target-input" list="target-list" placeholder="ISS (ZARYA), MOON, SUN&hellip;" autocomplete="off">
+          <datalist id="target-list"></datalist>
+        </div>
+        <button class="primary" id="track-btn">Track</button>
+      </div>
+      <p class="hint">Satellites re-aim every 3s; sun/moon/planets every 30s. List refreshes from the celestrak amateur-satellite catalog automatically.</p>
+    </div>
+
+    <div class="tab-panel" id="tab-loc">
+      <div class="field-row">
+        <div class="field">
+          <label for="loc-input">Maidenhead locator</label>
+          <input id="loc-input" placeholder="JO70AA" autocomplete="off" maxlength="8">
+        </div>
+        <button class="primary" id="loc-btn">Point</button>
+      </div>
+      <p class="hint">Points the rotator at 0&deg; elevation toward the given locator's great-circle heading and holds it.</p>
+    </div>
+
+    <div class="tab-panel" id="tab-raw">
+      <div class="field-row">
+        <div class="field">
+          <label for="raw-az">Azimuth (&deg;)</label>
+          <input id="raw-az" type="number" step="0.1" placeholder="180.0">
+        </div>
+        <div class="field">
+          <label for="raw-el">Elevation (&deg;)</label>
+          <input id="raw-el" type="number" step="0.1" placeholder="45.0">
+        </div>
+        <button class="primary" id="raw-btn">Set</button>
+      </div>
+      <p class="hint">Commands a fixed position and holds it, with live read-back.</p>
+    </div>
+  </section>
+
+  <section class="card full-width">
+    <h2>Event log</h2>
+    <div class="log-panel" id="log-panel"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
