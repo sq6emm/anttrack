@@ -18,7 +18,10 @@
 <main>
   <section class="card compass-wrap">
     <h2 style="align-self:flex-start;">Sky view</h2>
-    <svg id="compass" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Azimuth/elevation compass"></svg>
+    <span class="gauge-label">Azimuth (top-down)</span>
+    <svg id="compass" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Azimuth compass"></svg>
+    <span class="gauge-label">Elevation (side-on)</span>
+    <svg id="elevation-gauge" viewBox="0 0 200 140" width="240" height="168" role="img" aria-label="Elevation gauge"></svg>
     <div class="legend">
       <span class="swatch commanded">Commanded</span>
       <span class="swatch actual">Actual</span>

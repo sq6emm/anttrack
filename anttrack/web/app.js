@@ -136,21 +136,88 @@
   }
   buildCompassChrome();
 
-  function drawMarker(azDeg, elDeg, colorVar, id, filled) {
+  // -- elevation gauge (SVG quarter-circle protractor: 0deg = horizon, 90deg = zenith) --
+  const elevationGauge = $("elevation-gauge");
+  const EL_CX = 20, EL_CY = 115, EL_R = 85;
+
+  function elevationPoint(elDeg, radius = EL_R) {
+    const e = Math.max(0, Math.min(90, elDeg)) * Math.PI / 180;
+    return [EL_CX + radius * Math.cos(e), EL_CY - radius * Math.sin(e)];
+  }
+
+  function buildElevationChrome() {
+    elevationGauge.innerHTML = "";
+    const gridColor = getComputedStyle(document.documentElement).getPropertyValue("--gridline").trim();
+    const baselineColor = getComputedStyle(document.documentElement).getPropertyValue("--baseline").trim();
+    const mutedColor = getComputedStyle(document.documentElement).getPropertyValue("--text-muted").trim();
+
+    const arcPoints = [];
+    for (let e = 0; e <= 90; e += 3) arcPoints.push(elevationPoint(e).join(","));
+    const arc = document.createElementNS(NS, "polyline");
+    arc.setAttribute("points", arcPoints.join(" "));
+    arc.setAttribute("fill", "none");
+    arc.setAttribute("stroke", gridColor);
+    arc.setAttribute("stroke-width", "1");
+    elevationGauge.appendChild(arc);
+
+    for (const [x1, y1, x2, y2] of [
+      [EL_CX, EL_CY, EL_CX + EL_R + 14, EL_CY],       // horizon baseline
+      [EL_CX, EL_CY, EL_CX, EL_CY - EL_R - 14],       // zenith guide
+    ]) {
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", x1); line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2); line.setAttribute("y2", y2);
+      line.setAttribute("stroke", baselineColor);
+      line.setAttribute("stroke-width", "1.5");
+      elevationGauge.appendChild(line);
+    }
+
+    for (const e of [0, 30, 60, 90]) {
+      const [x, y] = elevationPoint(e);
+      const [xOut, yOut] = elevationPoint(e, EL_R + 8);
+      const tick = document.createElementNS(NS, "line");
+      tick.setAttribute("x1", x); tick.setAttribute("y1", y);
+      tick.setAttribute("x2", xOut); tick.setAttribute("y2", yOut);
+      tick.setAttribute("stroke", mutedColor);
+      tick.setAttribute("stroke-width", "1.5");
+      elevationGauge.appendChild(tick);
+
+      const [xLabel, yLabel] = elevationPoint(e, EL_R + 22);
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("x", xLabel); text.setAttribute("y", yLabel + 4);
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("font-size", "11"); text.setAttribute("fill", mutedColor);
+      text.textContent = e + "°";
+      elevationGauge.appendChild(text);
+    }
+  }
+  buildElevationChrome();
+
+  function placeMarker(svgEl, id, point, colorVar, filled) {
     let el = document.getElementById(id);
-    if (azDeg == null || elDeg == null) { if (el) el.remove(); return; }
+    if (!point) { if (el) el.remove(); return; }
+    const [x, y] = point;
     const color = getComputedStyle(document.documentElement).getPropertyValue(colorVar).trim();
-    const [x, y] = polarPoint(azDeg, elDeg);
     if (!el) {
       el = document.createElementNS(NS, "circle");
       el.id = id;
       el.setAttribute("r", 6);
-      compass.appendChild(el);
+      svgEl.appendChild(el);
     }
     el.setAttribute("cx", x); el.setAttribute("cy", y);
     el.setAttribute("fill", filled ? color : "none");
     el.setAttribute("stroke", color);
     el.setAttribute("stroke-width", "2");
+  }
+
+  function drawMarker(azDeg, elDeg, colorVar, id, filled) {
+    const point = (azDeg == null || elDeg == null) ? null : polarPoint(azDeg, elDeg);
+    placeMarker(compass, id, point, colorVar, filled);
+  }
+
+  function drawElevationMarker(elDeg, colorVar, id, filled) {
+    const point = (elDeg == null) ? null : elevationPoint(elDeg);
+    placeMarker(elevationGauge, id, point, colorVar, filled);
   }
 
   // -- status rendering --
@@ -190,6 +257,11 @@
       "--series-commanded", "marker-commanded", false);
     drawMarker(s.actual && s.actual.az, s.actual && s.actual.el,
       "--series-actual", "marker-actual", true);
+
+    drawElevationMarker(s.commanded && s.commanded.el,
+      "--series-commanded", "el-marker-commanded", false);
+    drawElevationMarker(s.actual && s.actual.el,
+      "--series-actual", "el-marker-actual", true);
   }
 
   // -- log panel --

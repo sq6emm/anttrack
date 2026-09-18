@@ -149,6 +149,13 @@ main {
 .legend .swatch.commanded { --sw-color: var(--series-commanded); }
 .legend .swatch.actual { --sw-color: var(--series-actual); }
 
+.gauge-label {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

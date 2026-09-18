@@ -7,6 +7,7 @@ threads (e.g. API request handlers).
 """
 
 import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +38,11 @@ ROTATOR_DEADBAND_DEG = 0.05
 
 # Seconds to wait before retrying after a rotator communication error.
 RECONNECT_DELAY_S = 3.0
+
+# However rarely the target itself is re-aimed (e.g. every 30s for slow
+# targets, or never again for a fixed loc/raw point), the rotator's actual
+# position is still polled and pushed to status/API/UI at least this often.
+STATUS_POLL_INTERVAL_S = 3.0
 
 LOG_MAXLEN = 500
 
@@ -251,7 +257,7 @@ class Tracker:
         )
         self._thread.start()
 
-    def _run_loop(self, mode, aim_fn, update_interval_s, check_horizon, stop_event):
+    def _run_loop(self, mode, aim_fn, aim_interval_s, check_horizon, stop_event):
         rot = self._ensure_rotator()
         try:
             rot.open()
@@ -263,32 +269,48 @@ class Tracker:
 
         lead_time_s = self.rotator_cfg["lead_time_s"]
         error_threshold_deg = self.rotator_cfg["error_threshold_deg"]
+        # However slow the re-aim cadence is for this target (e.g. 30s for
+        # sun/moon/planets/loc/raw), still poll+publish the rotator's actual
+        # position at least this often, so the status/UI stay live.
+        poll_interval_s = min(STATUS_POLL_INTERVAL_S, aim_interval_s)
+
         last_cmd_az, last_cmd_el = None, None
         prev_az_error, prev_el_error = None, None
         az_stall_count, el_stall_count = 0, 0
+        below_horizon = None
+        next_aim_at = 0.0  # monotonic deadline; due immediately on the first tick
 
         with self._lock:
             self._state.update(connected=True)
 
         while not stop_event.is_set():
             try:
-                t = self._ts.now()
-                t_lead = t + timedelta(seconds=lead_time_s) if lead_time_s else t
-                az, el = aim_fn(t_lead)
-                az, el = float(az), float(el)
+                now = time.monotonic()
+                if now >= next_aim_at:
+                    t = self._ts.now()
+                    t_lead = t + timedelta(seconds=lead_time_s) if lead_time_s else t
+                    az, el = aim_fn(t_lead)
+                    az, el = float(az), float(el)
 
-                below_horizon = bool(check_horizon and el <= 0)
-                if not below_horizon:
-                    cmd_az, cmd_el = round(az, 1), round(el, 1)
-                    moved = (last_cmd_az is None
-                             or azimuth_diff(cmd_az, last_cmd_az) >= ROTATOR_DEADBAND_DEG
-                             or abs(cmd_el - last_cmd_el) >= ROTATOR_DEADBAND_DEG)
-                    if moved:
-                        rot.set_position(cmd_az, cmd_el)
+                    below_horizon = bool(check_horizon and el <= 0)
+                    if not below_horizon:
+                        cmd_az, cmd_el = round(az, 1), round(el, 1)
+                        moved = (last_cmd_az is None
+                                 or azimuth_diff(cmd_az, last_cmd_az) >= ROTATOR_DEADBAND_DEG
+                                 or abs(cmd_el - last_cmd_el) >= ROTATOR_DEADBAND_DEG)
+                        if moved:
+                            rot.set_position(cmd_az, cmd_el)
+                            with self._lock:
+                                self._log_line(f"SET az={cmd_az} el={cmd_el}")
+                        else:
+                            cmd_az, cmd_el = last_cmd_az, last_cmd_el
                     else:
-                        cmd_az, cmd_el = last_cmd_az, last_cmd_el
-                else:
-                    cmd_az, cmd_el = None, None
+                        cmd_az, cmd_el = None, None
+                        with self._lock:
+                            self._log_line(f"BELOW HORIZON az={round(az, 2)} el={round(el, 2)}")
+
+                    last_cmd_az, last_cmd_el = cmd_az, cmd_el
+                    next_aim_at = now + aim_interval_s
 
                 raz, rel = rot.get_position()
 
@@ -321,7 +343,8 @@ class Tracker:
                 with self._lock:
                     self._state.update(
                         last_update_utc=_utcnow_iso(),
-                        commanded=({"az": cmd_az, "el": cmd_el} if cmd_az is not None else None),
+                        commanded=({"az": last_cmd_az, "el": last_cmd_el}
+                                   if last_cmd_az is not None else None),
                         actual={"az": round(raz, 2), "el": round(rel, 2)},
                         below_horizon=below_horizon,
                         connected=True,
@@ -330,16 +353,11 @@ class Tracker:
                         az_error_deg=(round(az_error, 2) if az_error is not None else None),
                         el_error_deg=(round(el_error, 2) if el_error is not None else None),
                     )
-                    if below_horizon:
-                        self._log_line(f"BELOW HORIZON az={round(az, 2)} el={round(el, 2)}")
-                    elif cmd_az is not None and (last_cmd_az, last_cmd_el) != (cmd_az, cmd_el):
-                        self._log_line(f"SET az={cmd_az} el={cmd_el}")
                     self._log_line(f"GET az={round(raz, 2)} el={round(rel, 2)}")
                     if warning:
                         self._log_line(f"WARNING: {warning}")
 
-                last_cmd_az, last_cmd_el = cmd_az, cmd_el
-                stop_event.wait(update_interval_s)
+                stop_event.wait(poll_interval_s)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:  # pylint: disable=broad-except
@@ -364,6 +382,7 @@ class Tracker:
                 last_cmd_az, last_cmd_el = None, None
                 prev_az_error, prev_el_error = None, None
                 az_stall_count, el_stall_count = 0, 0
+                next_aim_at = 0.0  # force a fresh aim right after reconnecting
                 stop_event.wait(RECONNECT_DELAY_S)
 
         try:
