@@ -184,23 +184,34 @@ async def api_camera_stream(request: Request):
     if not camera.enabled:
         return _json_error(404, "no camera configured")
 
-    init_segment = await asyncio.to_thread(camera.get_init_segment, CAMERA_INIT_WAIT_S)
-    if init_segment is None:
+    # Each client gets its own queue, primed with the MP4 header and the
+    # fragments back to the last keyframe so playback starts on a decodable
+    # frame; the queue is what keeps a slow client from silently missing
+    # fragments, which would leave a hole its <video> element can't play past.
+    subscriber = await asyncio.to_thread(camera.subscribe, CAMERA_INIT_WAIT_S)
+    if subscriber is None:
         return _json_error(503, "camera stream not ready yet")
 
     async def fragments():
-        yield init_segment
-        seq = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            fragment, seq = await asyncio.to_thread(
-                camera.get_fragment, seq, CAMERA_FRAGMENT_WAIT_S)
-            if fragment is None:
-                continue  # nothing new within the wait window; recheck disconnect and retry
-            yield fragment
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                fragment = await asyncio.to_thread(
+                    subscriber.next_fragment, CAMERA_FRAGMENT_WAIT_S)
+                if fragment is None:
+                    if subscriber.closed:
+                        # The relay restarted (new header, timestamps back to
+                        # zero) or we fell too far behind. End the response so
+                        # the browser reconnects and reads the new header.
+                        break
+                    continue  # nothing new within the wait window; retry
+                yield fragment
+        finally:
+            camera.unsubscribe(subscriber)
 
-    return StreamingResponse(fragments(), media_type="video/mp4")
+    return StreamingResponse(
+        fragments(), media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/ws/status")

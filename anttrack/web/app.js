@@ -291,11 +291,17 @@
     return key ? `${path}${path.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}` : path;
   }
 
+  const CAMERA_STALL_MS = 6000;      // no decode progress this long -> reconnect
+  const CAMERA_MAX_LAG_S = 6;        // further behind the live edge -> reconnect
+  const CAMERA_CATCHUP_LAG_S = 1.5;  // mildly behind -> play a little faster
+
   const cameraPanel = $("camera-panel");
   const cameraVideo = $("camera-video");
   const cameraOverlay = $("camera-overlay");
   let cameraStarted = false;
   let cameraRetryTimer = null;
+  let cameraProgressAt = 0;   // when playback position last moved
+  let cameraLastTime = -1;
 
   function setCameraOverlay(text) {
     if (text) { cameraOverlay.textContent = text; cameraOverlay.classList.add("show"); }
@@ -304,20 +310,86 @@
 
   function startCameraStream() {
     clearTimeout(cameraRetryTimer);
+    cameraRetryTimer = null;
     setCameraOverlay("Connecting…");
+    cameraProgressAt = performance.now();
+    cameraLastTime = -1;
+    cameraVideo.playbackRate = 1;
     cameraVideo.src = withKey(`/api/camera/stream.mp4?t=${Date.now()}`);
     cameraVideo.load();
     cameraVideo.play().catch(() => { /* autoplay can reject before data arrives; ignore */ });
   }
 
-  function retryCameraStream() {
-    setCameraOverlay("Camera unavailable – retrying…");
-    cameraRetryTimer = setTimeout(startCameraStream, 5000);
+  function detachCameraStream() {
+    cameraVideo.pause();
+    cameraVideo.removeAttribute("src");
+    cameraVideo.load();  // aborts the in-flight request so the relay drops us
   }
 
+  function retryCameraStream(message, delayMs) {
+    if (cameraRetryTimer) return;  // a reconnect is already pending
+    setCameraOverlay(message);
+    detachCameraStream();
+    if (document.hidden) return;   // picked up again on visibilitychange
+    cameraRetryTimer = setTimeout(() => {
+      cameraRetryTimer = null;
+      startCameraStream();
+    }, delayMs);
+  }
+
+  // A <video> fed a live stream can wedge without firing `error`: a hole in
+  // the fragments, a timestamp discontinuity or a throttled background tab
+  // all leave it sitting on a blank frame. Nothing tells us about that, so
+  // watch the playback position and reconnect when it stops advancing.
+  function cameraWatchdog() {
+    if (cameraPanel.hidden || document.hidden || !cameraVideo.src || cameraRetryTimer) return;
+
+    const now = cameraVideo.currentTime;
+    if (now !== cameraLastTime) {
+      cameraLastTime = now;
+      cameraProgressAt = performance.now();
+    }
+    if (cameraVideo.paused) {
+      // Autoplay refused, or we paused on a hidden tab: nudge it and give the
+      // stall timer a fresh window rather than reconnecting pointlessly.
+      cameraVideo.play().catch(() => {});
+      cameraProgressAt = performance.now();
+      return;
+    }
+
+    const buffered = cameraVideo.buffered;
+    const lag = buffered.length ? buffered.end(buffered.length - 1) - now : 0;
+    if (performance.now() - cameraProgressAt > CAMERA_STALL_MS) {
+      retryCameraStream("Stream stalled – reconnecting…", 500);
+    } else if (lag > CAMERA_MAX_LAG_S) {
+      // Too far behind to catch up smoothly; a fresh connection starts at the
+      // relay's live edge.
+      retryCameraStream("Behind live – reconnecting…", 500);
+    } else {
+      cameraVideo.playbackRate = lag > CAMERA_CATCHUP_LAG_S ? 1.25 : 1;
+    }
+  }
+  setInterval(cameraWatchdog, 1000);
+
   cameraVideo.addEventListener("playing", () => setCameraOverlay(""));
-  cameraVideo.addEventListener("error", retryCameraStream);
-  cameraVideo.addEventListener("ended", retryCameraStream);
+  cameraVideo.addEventListener("error", () => retryCameraStream("Camera unavailable – retrying…", 5000));
+  // The relay ends the response when ffmpeg restarts, since the new stream
+  // has its own header; reconnect promptly to read it.
+  cameraVideo.addEventListener("ended", () => retryCameraStream("Reconnecting…", 1000));
+
+  document.addEventListener("visibilitychange", () => {
+    if (!cameraStarted) return;
+    if (document.hidden) {
+      // Hidden tabs stop rendering, so the buffer runs away from the live
+      // edge and we come back to a frozen frame. Drop the stream instead.
+      clearTimeout(cameraRetryTimer);
+      cameraRetryTimer = null;
+      setCameraOverlay("Paused");
+      detachCameraStream();
+    } else {
+      startCameraStream();
+    }
+  });
 
   async function pollCameraStatus() {
     try {
@@ -325,6 +397,10 @@
       if (!status.enabled) { cameraPanel.hidden = true; return; }
       cameraPanel.hidden = false;
       if (!cameraStarted) { cameraStarted = true; startCameraStream(); }
+      if (!status.connected && !document.hidden
+          && performance.now() - cameraProgressAt > CAMERA_STALL_MS) {
+        setCameraOverlay(status.error ? `Camera offline: ${status.error}` : "Camera offline…");
+      }
     } catch (err) {
       console.error("camera status poll failed", err);
     }

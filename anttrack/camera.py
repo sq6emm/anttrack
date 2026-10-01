@@ -17,10 +17,23 @@ decoding it first; every output frame is then forced to be a keyframe
 client that just connected) which keeps that re-encode cheap at a low
 fps -- appropriate for a subject that isn't moving in frame anyway.
 
+Each connected client gets its own fragment queue rather than sharing a
+single "latest fragment" slot. A <video> fed a live fMP4 stream needs
+*every* fragment in order: in stream-copy mode the fragments are
+inter-coded frames, so a dropped one breaks the reference chain and
+leaves a hole in the media timeline, and the element then wedges on that
+hole showing a blank (grey) frame without ever firing an `error` event.
+For the same reason a client is handed the fragments back to the last
+keyframe when it joins (so it starts on something decodable), and its
+response is closed when ffmpeg restarts -- a new ffmpeg means a new moov
+and timestamps starting over at zero, which the already-running element
+can't follow, so it has to reconnect and re-read the header.
+
 Runs in a background thread with the same reconnect-on-any-error shape
 as the rotator tracking loop.
 """
 
+import collections
 import shutil
 import subprocess
 import threading
@@ -30,6 +43,22 @@ from datetime import datetime, timezone
 RECONNECT_DELAY_S = 5.0
 STALE_TIMEOUT_S = 10.0
 SNAPSHOT_TIMEOUT_S = 8.0
+
+# Per-client queue depth. A client this far behind can't catch up on a live
+# stream, and dropping fragments to let it would corrupt its timeline, so it
+# gets disconnected and rejoins at the live edge instead.
+MAX_QUEUED_FRAGMENTS = 150
+
+# Keyframe-anchored replay buffer handed to joining clients, capped so a
+# camera with a very long (or absent) keyframe interval can't grow it without
+# bound. ~10s at 15fps / 4MB.
+MAX_REPLAY_FRAGMENTS = 150
+MAX_REPLAY_BYTES = 4 * 1024 * 1024
+
+# ISO-BMFF sample flags (trun/tfhd): ffmpeg marks a keyframe
+# sample_depends_on=2 ("depends on nothing"), others non-sync.
+_SAMPLE_FLAG_DEPENDS_NO = 0x02000000
+_SAMPLE_FLAG_NON_SYNC = 0x00010000
 
 
 def _read_exact(fp, n):
@@ -64,6 +93,149 @@ def _read_box(fp):
     return box_type, header + body
 
 
+def _iter_child_boxes(body):
+    """Yield (type, payload) for each box in an ISO-BMFF container payload."""
+    offset = 0
+    while offset + 8 <= len(body):
+        size = int.from_bytes(body[offset:offset + 4], "big")
+        box_type = body[offset + 4:offset + 8]
+        header = 8
+        if size == 1:
+            if offset + 16 > len(body):
+                return
+            size = int.from_bytes(body[offset + 8:offset + 16], "big")
+            header = 16
+        elif size == 0:
+            size = len(body) - offset
+        if size < header or offset + size > len(body):
+            return  # truncated or malformed; stop rather than guess
+        yield box_type, body[offset + header:offset + size]
+        offset += size
+
+
+def _sample_flags_are_sync(flags):
+    return bool(flags & _SAMPLE_FLAG_DEPENDS_NO) and not flags & _SAMPLE_FLAG_NON_SYNC
+
+
+def _trun_has_sync_sample(payload, default_sample_flags):
+    """True if a trun box describes at least one keyframe sample."""
+    if len(payload) < 8:
+        return False
+    flags = int.from_bytes(payload[1:4], "big")
+    sample_count = int.from_bytes(payload[4:8], "big")
+    offset = 8
+    if flags & 0x000001:  # data-offset-present
+        offset += 4
+    if flags & 0x000004:  # first-sample-flags-present
+        if len(payload) < offset + 4:
+            return False
+        if _sample_flags_are_sync(int.from_bytes(payload[offset:offset + 4], "big")):
+            return True
+        offset += 4
+        sample_count -= 1  # the first sample's flags replace the per-sample ones
+
+    entry_size = (4 * bool(flags & 0x000100) + 4 * bool(flags & 0x000200)
+                  + 4 * bool(flags & 0x000400) + 4 * bool(flags & 0x000800))
+    if not flags & 0x000400:
+        # No per-sample flags: every remaining sample uses the track default.
+        return (sample_count > 0 and default_sample_flags is not None
+                and _sample_flags_are_sync(default_sample_flags))
+
+    flags_offset = offset + 4 * bool(flags & 0x000100) + 4 * bool(flags & 0x000200)
+    for index in range(max(sample_count, 0)):
+        start = flags_offset + index * entry_size
+        if start + 4 > len(payload):
+            break
+        if _sample_flags_are_sync(int.from_bytes(payload[start:start + 4], "big")):
+            return True
+    return False
+
+
+def _tfhd_default_sample_flags(payload):
+    """default_sample_flags from a tfhd box, or None if it carries none."""
+    if len(payload) < 8:
+        return None
+    flags = int.from_bytes(payload[1:4], "big")
+    if not flags & 0x000020:  # default-sample-flags-present
+        return None
+    offset = 8  # version/flags + track_ID
+    if flags & 0x000001:  # base-data-offset-present
+        offset += 8
+    if flags & 0x000002:  # sample-description-index-present
+        offset += 4
+    if flags & 0x000008:  # default-sample-duration-present
+        offset += 4
+    if flags & 0x000010:  # default-sample-size-present
+        offset += 4
+    if offset + 4 > len(payload):
+        return None
+    return int.from_bytes(payload[offset:offset + 4], "big")
+
+
+def fragment_has_keyframe(moof):
+    """True if a complete moof box describes at least one keyframe sample.
+
+    Used to anchor the replay buffer: a client that starts mid-GOP has no
+    reference frames and renders nothing until the camera's next keyframe.
+    """
+    for box_type, payload in _iter_child_boxes(moof[8:]):
+        if box_type != b"traf":
+            continue
+        default_sample_flags = None
+        truns = []
+        for child_type, child_payload in _iter_child_boxes(payload):
+            if child_type == b"tfhd":
+                default_sample_flags = _tfhd_default_sample_flags(child_payload)
+            elif child_type == b"trun":
+                truns.append(child_payload)
+        for trun in truns:
+            if _trun_has_sync_sample(trun, default_sample_flags):
+                return True
+    return False
+
+
+class Subscriber:
+    """One connected client's fragment queue, fed by the relay thread."""
+
+    def __init__(self, generation, primed):
+        self.generation = generation
+        self._condition = threading.Condition()
+        self._queue = collections.deque(primed)
+        self._closed = False
+
+    @property
+    def closed(self):
+        with self._condition:
+            return self._closed and not self._queue
+
+    def push(self, fragment):
+        with self._condition:
+            if self._closed:
+                return
+            if len(self._queue) >= MAX_QUEUED_FRAGMENTS:
+                # Too far behind to ever catch up; close instead of dropping
+                # fragments, which would corrupt what it has already buffered.
+                self._closed = True
+                self._queue.clear()
+            else:
+                self._queue.append(fragment)
+            self._condition.notify_all()
+
+    def close(self):
+        """Stop accepting fragments; whatever is queued can still be read."""
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    def next_fragment(self, timeout):
+        """Next queued fragment, or None on timeout or once closed and drained."""
+        with self._condition:
+            self._condition.wait_for(lambda: self._queue or self._closed, timeout=timeout)
+            if self._queue:
+                return self._queue.popleft()
+            return None
+
+
 class CameraStream:
     def __init__(self, rtsp_url, crop=None, scale=None, fps=None):
         self.rtsp_url = rtsp_url
@@ -74,8 +246,11 @@ class CameraStream:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._init_segment = None   # cached ftyp+moov, replayed to each new client
-        self._latest_fragment = None
-        self._fragment_seq = 0
+        self._replay = []           # fragments back to the last keyframe
+        self._replay_bytes = 0
+        self._have_keyframe = False
+        self._generation = 0        # bumped per ffmpeg run; clients can't span two
+        self._subscribers = []
         self._last_frame_utc = None
         self._connected = False
         self._error = None
@@ -115,23 +290,27 @@ class CameraStream:
                 "enabled": self.enabled,
                 "connected": self._connected,
                 "last_frame_utc": self._last_frame_utc,
+                "clients": len(self._subscribers),
                 "error": self._error,
             }
 
-    def get_init_segment(self, timeout=10.0):
-        """Block until the ftyp+moov header is available, or time out."""
+    def subscribe(self, timeout=10.0):
+        """Register a client, primed with the init segment and the fragments
+        back to the last keyframe. None if no header arrived within timeout."""
         with self._condition:
-            self._condition.wait_for(lambda: self._init_segment is not None, timeout=timeout)
-            return self._init_segment
+            ready = self._condition.wait_for(
+                lambda: self._init_segment is not None and self._replay, timeout=timeout)
+            if not ready:
+                return None
+            subscriber = Subscriber(self._generation, [self._init_segment] + self._replay)
+            self._subscribers.append(subscriber)
+            return subscriber
 
-    def get_fragment(self, after_seq=0, timeout=10.0):
-        """Block until a fragment newer than after_seq is ready, or time out."""
-        with self._condition:
-            got = self._condition.wait_for(
-                lambda: self._fragment_seq > after_seq, timeout=timeout)
-            if not got:
-                return None, after_seq
-            return self._latest_fragment, self._fragment_seq
+    def unsubscribe(self, subscriber):
+        with self._lock:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
+        subscriber.close()
 
     def capture_snapshot(self, timeout=SNAPSHOT_TIMEOUT_S):
         """One-off still JPEG grab, independent of the live relay. Uses the
@@ -166,9 +345,26 @@ class CameraStream:
                 with self._lock:
                     self._connected = False
                     self._error = str(exc)
-            with self._lock:
-                self._init_segment = None  # force a fresh header on reconnect
+            self._reset_for_reconnect()
             self._stop_event.wait(RECONNECT_DELAY_S)
+
+    def _reset_for_reconnect(self):
+        """Drop the cached header and cut every client loose.
+
+        The next ffmpeg run writes a fresh moov and restarts timestamps at
+        zero. A <video> that is already mid-playback can't follow that, and
+        would just freeze on the discontinuity, so end each response instead:
+        the client then reconnects and reads the new header from the start.
+        """
+        with self._lock:
+            self._init_segment = None
+            self._replay = []
+            self._replay_bytes = 0
+            self._have_keyframe = False
+            self._generation += 1
+            subscribers, self._subscribers = self._subscribers, []
+        for subscriber in subscribers:
+            subscriber.close()
 
     def _build_command(self):
         cmd = [
@@ -203,6 +399,38 @@ class CameraStream:
             "pipe:1",
         ]
         return cmd
+
+    def _publish_fragment(self, fragment, is_keyframe):
+        """Queue a fragment for every client and update the replay buffer."""
+        with self._condition:
+            if is_keyframe:
+                self._replay = [fragment]
+                self._replay_bytes = len(fragment)
+                self._have_keyframe = True
+            elif not self._have_keyframe:
+                # Nothing decodable to anchor on yet (no keyframe seen since
+                # this ffmpeg started, or the cap below gave up on one): hand
+                # joining clients just the newest fragment and let their
+                # decoder resynchronise on the camera's next keyframe.
+                self._replay = [fragment]
+                self._replay_bytes = len(fragment)
+            elif (len(self._replay) >= MAX_REPLAY_FRAGMENTS
+                    or self._replay_bytes + len(fragment) > MAX_REPLAY_BYTES):
+                # Keyframe interval longer than we're willing to buffer.
+                self._have_keyframe = False
+                self._replay = [fragment]
+                self._replay_bytes = len(fragment)
+            else:
+                self._replay.append(fragment)
+                self._replay_bytes += len(fragment)
+
+            self._last_frame_utc = datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds")
+            self._connected = True
+            self._error = None
+            for subscriber in self._subscribers:
+                subscriber.push(fragment)
+            self._condition.notify_all()
 
     def _stream_once(self):
         cmd = self._build_command()
@@ -239,17 +467,11 @@ class CameraStream:
                 elif box_type == b"mdat":
                     if pending_moof is None:
                         continue  # mdat without a preceding moof; drop and resync
+                    is_keyframe = fragment_has_keyframe(pending_moof)
                     fragment = pending_moof + box_bytes
                     pending_moof = None
                     last_frame_at = time.monotonic()
-                    with self._condition:
-                        self._latest_fragment = fragment
-                        self._fragment_seq += 1
-                        self._last_frame_utc = datetime.now(timezone.utc).isoformat(
-                            timespec="milliseconds")
-                        self._connected = True
-                        self._error = None
-                        self._condition.notify_all()
+                    self._publish_fragment(fragment, is_keyframe)
                 # other box types (e.g. free/styp padding) are ignored
         finally:
             self._proc = None
