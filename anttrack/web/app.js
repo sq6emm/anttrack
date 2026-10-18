@@ -223,7 +223,7 @@
   // -- status rendering --
   function fmtAzEl(pos) {
     if (!pos) return "—";
-    return `${pos.az.toFixed(1)}° / ${pos.el.toFixed(1)}°`;
+    return `${pos.az.toFixed(2)}° / ${pos.el.toFixed(2)}°`;
   }
 
   function renderStatus(s) {
