@@ -206,8 +206,8 @@ class Tracker:
         """Point (and hold) at the heading toward a Maidenhead locator."""
         locator = locator.strip()
         try:
-            heading = round(calculate_heading(self.qth_wwl, locator), 1)
-            distance = round(calculate_distance(self.qth_wwl, locator), 1)
+            heading = round(calculate_heading(self.qth_wwl, locator), 2)
+            distance = round(calculate_distance(self.qth_wwl, locator), 2)
         except Exception as exc:
             raise TrackerError(f"invalid locator {locator!r}: {exc}") from exc
 
@@ -294,7 +294,7 @@ class Tracker:
 
                     below_horizon = bool(check_horizon and el <= 0)
                     if not below_horizon:
-                        cmd_az, cmd_el = round(az, 1), round(el, 1)
+                        cmd_az, cmd_el = round(az, 2), round(el, 2)
                         moved = (last_cmd_az is None
                                  or azimuth_diff(cmd_az, last_cmd_az) >= ROTATOR_DEADBAND_DEG
                                  or abs(cmd_el - last_cmd_el) >= ROTATOR_DEADBAND_DEG)
